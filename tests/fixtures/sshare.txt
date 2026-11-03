@@ -1,0 +1,4 @@
+CLUSTER: wice
+lp_group|1.000000
+lp_other|0.020090
+wicedefaultslurmaccount|1.000000

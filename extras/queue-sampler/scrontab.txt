@@ -1,0 +1,10 @@
+# Load with `scrontab scrontab.txt` on a wICE login node after replacing <account> and <path>.
+# It runs as a 5-minute batch job every 30 min and costs a few credits a day.
+#SCRON -A <account>
+#SCRON -p batch
+#SCRON -n 1
+#SCRON -t 00:05:00
+#SCRON -J queue-sampler
+#SCRON --open-mode=append
+#SCRON -o <path>/queue-sampler/scron.log
+*/30 * * * * <path>/slurm-jobs/extras/queue-sampler/sample.sh <path>/queue-sampler

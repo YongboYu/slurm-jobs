@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Which array tasks still have units left, as an --array list to resubmit.
+
+Reads the same layout as templates/array.sbatch: units.txt (one unit per line), task i owns
+lines [i*PER_TASK, (i+1)*PER_TASK), and a finished unit leaves results/<unit>.done, where <unit>
+has '/' and ' ' replaced by '_'. Run it in the campaign folder (login node or locally):
+
+    remaining units.txt 10                 # results/ by default
+    remaining units.txt 10 --out results --limit 8
+
+Prints the units left per task, then the resubmit command. It reads files only and never
+submits; a task that failed on a real error shows up here too, so read its log before resubmitting.
+"""
+import argparse
+import math
+import os
+import sys
+
+
+def marker(unit):
+    return unit.replace("/", "_").replace(" ", "_") + ".done"
+
+
+def ranges(ids):
+    out, start = [], None
+    for i, x in enumerate(ids):
+        if start is None:
+            start = x
+        if i + 1 == len(ids) or ids[i + 1] != x + 1:
+            out.append(str(start) if start == x else f"{start}-{x}")
+            start = None
+    return ",".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("units", help="units file, one unit per line")
+    ap.add_argument("per_task", type=int, help="PER_TASK in the sbatch script")
+    ap.add_argument("--out", default="results", help="folder with the .done markers (default results)")
+    ap.add_argument("--limit", type=int, help="add %%K to the --array list")
+    a = ap.parse_args()
+
+    units = [line.rstrip("\n") for line in open(a.units)]
+    units = [u for u in units if u.strip()] if units and not units[-1].strip() else units
+    seen, dups = set(), set()
+    for u in units:
+        (dups if u in seen else seen).add(u)
+    if dups:
+        print(f"warning: {len(dups)} duplicate units share a .done marker, e.g. {sorted(dups)[0]!r}", file=sys.stderr)
+
+    done = set(os.listdir(a.out)) if os.path.isdir(a.out) else set()
+    tasks = math.ceil(len(units) / a.per_task)
+    left = {}
+    for t in range(tasks):
+        mine = units[t * a.per_task:(t + 1) * a.per_task]
+        n = sum(marker(u) not in done for u in mine)
+        if n:
+            left[t] = n
+    total = sum(left.values())
+    print(f"{len(units)} units in {tasks} tasks; {len(units) - total} done, {total} left in {len(left)} tasks")
+    for t, n in left.items():
+        print(f"  task {t}: {n} left")
+    if left:
+        spec = ranges(sorted(left)) + (f"%{a.limit}" if a.limit else "")
+        print(f"resubmit:  sbatch --array={spec} <script>")
+    return 1 if left else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

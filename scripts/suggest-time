@@ -1,0 +1,278 @@
+#!/usr/bin/env python3
+"""Size Slurm requests from your own sacct history: --time, --mem, and the CPU/GPU sweet spot.
+
+Run on a login node (Python 3 standard library only):
+
+    suggest-time pmf_lora_train                  # one job name: suggest --time and --mem
+    suggest-time 'pmf-conf-.*' --days 180 -M wice  # regex over job names
+    suggest-time --jobs 6253456,6253457          # pilot report: these jobs (or arrays), side by side
+    suggest-time --jobs 6253456 --units 10 --scale 400   # pilot did 10 work units; project 400
+    suggest-time -M mindwell --jobs 812                  # jobs on the other cluster need -M
+
+Sizing rules (history mode):
+    --time  1.5 x the 95th-percentile run time, at least the longest run + 10 min,
+            rounded up to 10 min (the backfill resolution on wICE and mindwell)
+    --mem   1.3 x the 95th-percentile peak memory (MaxRSS), rounded up to 1 GB
+A run killed by its limit (TIMEOUT, OUT_OF_MEMORY) is censored: it only says "more than this",
+so the script warns and never suggests a limit below a killed run.
+
+Pilot mode groups the jobs by request shape (CPUs, GPUs) and reports elapsed time, CPU
+efficiency, peak memory, resource-hours and credits per shape, then names the shape that costs
+least (credits when billing is recorded, else resource-hours; by median) while staying within
+1.25x of the fastest. The --time, --mem and packing it suggests come from the slowest pilot at
+that shape, so the largest unit fits; when pilot run times differ more than 4x it says to give
+the large units their own array.
+Credits are Slurm billing x elapsed minutes (https://docs.vscentrum.be/leuven/credits.html).
+
+Offline: --sacct-file FILE reads saved `sacct -P -n --format=<FIELDS>` output.
+"""
+import argparse
+import datetime as dt
+import math
+import re
+import subprocess
+import sys
+from collections import defaultdict
+
+FIELDS = "JobIDRaw,JobID,JobName,State,ElapsedRaw,TimelimitRaw,MaxRSS,Partition,AllocCPUS,TotalCPU,ReqMem,AllocTRES,NodeList"
+SLACK = 1.5
+MEM_SLACK = 1.3
+STEP_MIN = 10
+NEAR_FASTEST = 1.25
+TASK_TARGET_MIN = 120   # aim for about 2 h per packed task
+WALLTIME_CAP_MIN = 3 * 1440  # batch*, gpu_*: 3 days
+
+
+def run_sacct(args):
+    res = subprocess.run(["sacct", "-P", "-n", f"--format={FIELDS}", *args], capture_output=True, text=True)
+    if res.returncode:
+        sys.exit(f"sacct failed: {res.stderr.strip()}")
+    return res.stdout.splitlines()
+
+
+def sacct_months(cluster, days):
+    """sacct refuses wide date ranges on VSC, so query one month at a time."""
+    end = dt.date.today() + dt.timedelta(days=1)
+    start = end - dt.timedelta(days=days)
+    out = []
+    while start < end:
+        stop = min(dt.date(start.year + start.month // 12, start.month % 12 + 1, 1), end)
+        out += run_sacct((["-M", cluster] if cluster else []) + ["-S", start.isoformat(), "-E", stop.isoformat()])
+        start = stop
+    return out
+
+
+def size_bytes(s):
+    m = re.fullmatch(r"([\d.]+)([KMGT]?)n?", s or "")
+    return float(m[1]) * 1024 ** " KMGT".index(m[2] or " ") if m else 0.0
+
+
+def seconds(s):
+    """TotalCPU comes as [D-][HH:]MM:SS[.mmm]."""
+    if not s:
+        return 0.0
+    days, _, rest = s.rpartition("-")
+    parts = [float(p) for p in rest.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0.0)
+    return (int(days) if days else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def gpus(tres):
+    m = re.search(r"gres/gpu=(\d+)", tres or "")
+    return int(m[1]) if m else 0
+
+
+def billing(tres):
+    m = re.search(r"billing=(\d+)", tres or "")
+    return int(m[1]) if m else 0
+
+
+def jobs(lines):
+    """One record per job (array task), with the peak memory of its steps."""
+    by_id = {}
+    for line in lines:
+        f = line.split("|")
+        if len(f) < 13:
+            continue
+        raw, jid, name, state, elapsed, limit, rss, part, cpus, tcpu, reqmem, tres, nodes = f[:13]
+        base = raw.split(".")[0]
+        rec = by_id.setdefault(base, {"rss": 0.0})
+        if "." not in raw:
+            rec.update(id=jid, name=name, state=(state.split() or ["UNKNOWN"])[0], run_s=int(elapsed or 0),
+                       limit_min=int(limit) if limit.isdigit() else None, part=part,
+                       cpus=int(cpus or 0), cpu_s=seconds(tcpu), req_mem=size_bytes(reqmem),
+                       gpus=gpus(tres), billing=billing(tres), node=nodes)
+        else:
+            rec["rss"] = max(rec["rss"], size_bytes(rss))
+    return [j for j in by_id.values() if "name" in j]
+
+
+def pct(xs, q):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, math.ceil(q * len(xs)) - 1)]
+
+
+def hm(minutes):
+    minutes = int(math.ceil(minutes))
+    d, rest = divmod(minutes, 1440)
+    h, m = divmod(rest, 60)
+    return f"{d}-{h:02d}:{m:02d}:00" if d else f"{h:02d}:{m:02d}:00"
+
+
+def round_up(minutes):
+    return math.ceil(minutes / STEP_MIN) * STEP_MIN
+
+
+def gb(b):
+    return b / 1024 ** 3
+
+
+def history(mine, label):
+    done = [j for j in mine if j["state"] == "COMPLETED" and j["run_s"] >= 120]
+    hit = [j for j in mine if j["state"] in ("TIMEOUT", "OUT_OF_MEMORY")]
+    states = defaultdict(int)
+    for j in mine:
+        states[j["state"]] += 1
+    print(f"{label}: {len(mine)} jobs ({', '.join(f'{v} {k.lower()}' for k, v in sorted(states.items()))})")
+    if len(done) < 3:
+        print("  fewer than 3 completed runs over 2 min: run a pilot first (see --jobs).")
+        return
+    runs = [j["run_s"] / 60 for j in done]
+    p50, p95, mx = pct(runs, 0.5), pct(runs, 0.95), max(runs)
+    limits = [j["limit_min"] for j in done if j["limit_min"]]
+    suggest = round_up(max(SLACK * p95, mx + 10))
+    print(f"  completed runs: {len(done)}; run time median {hm(p50)}, 95% within {hm(p95)}, longest {hm(mx)}")
+    if limits:
+        print(f"  limit you asked for (median): {hm(pct(limits, 0.5))}")
+    killed = [j["run_s"] / 60 for j in mine if j["state"] == "TIMEOUT"]
+    if killed and suggest <= max(killed):
+        print(f"  no safe --time: a run was killed at {hm(max(killed))}, above what the completed runs suggest"
+              f" ({hm(suggest)}). Split this job per input, or checkpoint and resubmit.")
+    else:
+        print(f"  suggest  --time={hm(suggest)}")
+    rss = [j["rss"] for j in done if j["rss"]]
+    if rss:
+        print(f"  peak memory 95% within {gb(pct(rss, 0.95)):.1f} GB; suggest  --mem={math.ceil(MEM_SLACK * gb(pct(rss, 0.95)))}G")
+    eff = [j["cpu_s"] / (j["run_s"] * j["cpus"]) for j in done if j["cpus"] and j["run_s"] and j["cpu_s"]]
+    if eff and pct(eff, 0.5) < 0.5:
+        print(f"  CPU efficiency median {pct(eff, 0.5):.0%}: fewer CPUs would likely run as fast (pilot it).")
+    if hit:
+        kinds = ", ".join(sorted({j['state'].lower() for j in hit}))
+        print(f"  warning: {len(hit)} runs were killed ({kinds}); their real need is unknown, so the"
+              " numbers above may be too low. Checkpoint, or split the work by dataset or window.")
+    if p95 > 4 * p50:
+        print("  warning: run times vary more than 4x; if they depend on the input, give each input its own"
+              " job name (e.g. per dataset) and size each separately.")
+
+
+def pilot(mine, units, scale):
+    print(f"{'job':>14} {'state':<10} {'cpus':>4} {'gpus':>4} {'elapsed':>9} {'cpu eff':>7} {'peak GB':>8}"
+          f" {'asked GB':>8} {'credits':>8}  node")
+    for j in sorted(mine, key=lambda j: j["id"]):
+        eff = f"{j['cpu_s'] / (j['run_s'] * j['cpus']):.0%}" if j["cpus"] and j["run_s"] and j["cpu_s"] else "n/a"
+        cr = j["billing"] * j["run_s"] / 60
+        print(f"{j['id']:>14} {j['state']:<10} {j['cpus']:>4} {j['gpus']:>4} {hm(j['run_s'] / 60):>9}"
+              f" {eff:>7} {gb(j['rss']):>8.1f} {gb(j['req_mem']):>8.1f} {cr:>8.0f}  {j['node']}")
+    done = [j for j in mine if j["state"] == "COMPLETED" and j["run_s"]]
+    if not done:
+        print("no completed pilot jobs yet")
+        return
+    killed = [j for j in mine if j["state"] in ("TIMEOUT", "OUT_OF_MEMORY")]
+    if killed:
+        print(f"warning: {len(killed)} pilot jobs were killed ({', '.join(sorted({j['state'].lower() for j in killed}))});"
+              " their units need a larger request or a split before the projection below holds.")
+    shapes = defaultdict(list)
+    for j in done:
+        shapes[(j["cpus"], j["gpus"])].append(j)
+    rows = []
+    for (c, g), js in sorted(shapes.items()):
+        els = [j["run_s"] / 60 for j in js]
+        el = pct(els, 0.5)
+        cost = el / 60 * (g if g else c)
+        credits = pct([j["billing"] * j["run_s"] / 60 for j in js], 0.5)
+        rows.append(dict(c=c, g=g, med=el, min=min(els), max=max(els), cost=cost, credits=credits,
+                         rss=max(j["rss"] for j in js), n=len(js)))
+    fastest = min(r["med"] for r in rows)
+    unit = "GPU-h" if any(r["g"] for r in rows) else "core-h"
+    print(f"\n{'cpus':>4} {'gpus':>4} {'runs':>4} {'median':>9} {'slowest':>9} {unit:>8} {'credits':>8} {'peak GB':>8}")
+    for r in rows:
+        print(f"{r['c']:>4} {r['g']:>4} {r['n']:>4} {hm(r['med']):>9} {hm(r['max']):>9} {r['cost']:>8.2f}"
+              f" {r['credits']:>8.0f} {gb(r['rss']):>8.1f}")
+    # Credits bill CPUs and GPUs both, so rank by credits when Slurm recorded billing.
+    key, label = ("credits", "credits") if all(r["credits"] for r in rows) else ("cost", unit)
+    best = min((r for r in rows if r["med"] <= NEAR_FASTEST * fastest), key=lambda r: r[key])
+    print(f"\nsweet spot: {best['c']} CPUs, {best['g']} GPUs (within {NEAR_FASTEST}x of the fastest, lowest {label})")
+    worst = best["max"]
+    if best["n"] > 1 and worst > 4 * best["min"]:
+        print(f"  warning: pilot run times at this shape range {hm(best['min'])} to {hm(worst)} (over 4x). Sizing below"
+              " uses the slowest; give the large units their own array (own job name) so the small ones"
+              " are not over-asked.")
+    mem = f"--mem={math.ceil(MEM_SLACK * gb(best['rss']))}G"
+    if units:
+        per = worst / units
+        print(f"  {per:.2f} min per work unit (slowest pilot)", end="")
+        if per <= TASK_TARGET_MIN:
+            pack = max(1, int(TASK_TARGET_MIN / per))
+            task_min = round_up(SLACK * per * pack)
+            print(f"; pack {pack} units per task: suggest  --time={hm(task_min)} {mem}")
+        else:
+            pack = 1
+            task_min = round_up(SLACK * per)
+            print(f"; one unit already runs over {TASK_TARGET_MIN // 60} h: one unit per task,"
+                  f" suggest  --time={hm(task_min)} {mem}")
+        if task_min > WALLTIME_CAP_MIN:
+            print(f"  warning: {hm(task_min)} is over the 3-day cap of batch and gpu_* partitions:"
+                  " checkpoint or split the unit itself.")
+        if scale:
+            tasks = math.ceil(scale / pack)
+            per_med = best["med"] / units
+            cr_per_min = best["credits"] / best["med"] if best["med"] else 0
+            print(f"  {scale:g} units = {tasks} tasks (--array=0-{tasks - 1}%K); run time about {hm(per_med * scale)}"
+                  f" (median), up to {hm(per * scale)} (slowest);"
+                  f" credits about {cr_per_min * per_med * scale:,.0f} to {cr_per_min * per * scale:,.0f}.")
+            print("  worst-case quote (every task to its limit): sam-quote sbatch --array=... <script>; balance: sam-balance")
+    else:
+        task_min = round_up(SLACK * worst)
+        print(f"  suggest  --time={hm(task_min)} {mem} for a task as large as the slowest pilot")
+    big = [j for j in done if j["req_mem"] and j["cpus"] and j["cpu_s"] and j["cpu_s"] / (j["run_s"] * j["cpus"]) < 0.1]
+    if big:
+        print("  note: CPU efficiency under 10%. A large --mem makes Slurm allocate (and bill) the cores that"
+              " come with that memory; ask for the memory the job peaks at, not the node's.")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("name", nargs="?", help="job name, or a regex matched against the whole name")
+    ap.add_argument("--jobs", help="comma-separated job IDs (arrays included): pilot report")
+    ap.add_argument("-M", "--cluster", default=None)
+    ap.add_argument("--days", type=int, default=120, help="history window in days (default 120)")
+    ap.add_argument("--units", type=float, help="work units each pilot job processed")
+    ap.add_argument("--scale", type=float, help="total work units to project")
+    ap.add_argument("--sacct-file", help="read saved sacct output instead of calling sacct")
+    a = ap.parse_args()
+    if not a.name and not a.jobs:
+        ap.error("give a job name or --jobs")
+
+    if a.sacct_file:
+        lines = open(a.sacct_file).read().splitlines()
+    elif a.jobs:
+        lines = run_sacct((["-M", a.cluster] if a.cluster else []) + ["-j", a.jobs])
+    else:
+        lines = sacct_months(a.cluster, a.days)
+    recs = jobs(lines)
+
+    if a.jobs:
+        wanted = set(a.jobs.split(","))
+        mine = [j for j in recs if j["id"].split("_")[0] in wanted or j["id"] in wanted] if a.sacct_file else recs
+        pilot(mine, a.units, a.scale)
+    else:
+        pat = re.compile(a.name)
+        mine = [j for j in recs if pat.fullmatch(j["name"])]
+        if not mine:
+            sys.exit(f"no jobs named {a.name!r} in the last {a.days} days")
+        history(mine, a.name)
+
+
+if __name__ == "__main__":
+    main()

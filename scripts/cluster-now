@@ -1,0 +1,54 @@
+#!/bin/bash
+# Where a GPU job would start soonest right now. Per cluster: your accounts' fair-share. Per GPU
+# partition: GPUs free, GPUs a job of your shape could start on (enough idle CPUs and memory
+# left on the same node), GPUs free only on nodes held for a higher job, and pending jobs.
+# Run on a KU Leuven login node.
+#
+#   cluster-now [-A account] [-c cpus-per-gpu] [-m GB-per-gpu] [-M clusters]
+#     -A  only this account (default: every account you have, except *defaultslurmaccount)
+#     -c  CPUs your job needs per GPU      (default 4)
+#     -m  memory your job needs per GPU, GB (default 32)
+#     -M  clusters, comma-separated        (default wice,mindwell)
+#
+# Columns: free = GPUs not allocated on nodes that are up; fit = GPUs on nodes with free GPUs and
+# also -c CPUs and -m GB per GPU idle; held = free GPUs on nodes Slurm holds for a pending higher
+# job (state "mix-"/"idle-"): a job starts there only by backfill, if it ends before that job's
+# reserved start. Debug, long and dedicated partitions are left out.
+set -o pipefail
+ACCOUNT= CPG=4 GPG=32 CLUSTERS=wice,mindwell
+while getopts "A:c:m:M:h" o; do
+  case $o in
+    A) ACCOUNT=$OPTARG ;; c) CPG=$OPTARG ;; m) GPG=$OPTARG ;; M) CLUSTERS=$OPTARG ;;
+    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+  esac
+done
+Q=${VSC_QUEUESTATE:-/etc/motd.d/vsc_queuestate}   # login message with pending jobs per partition
+
+for c in ${CLUSTERS//,/ }; do
+  fs=$(sshare -M "$c" -U -n -P -o Account,FairShare 2>/dev/null |
+    awk -F"|" -v a="$ACCOUNT" '$1 == "CLUSTER: " || NF < 2 {next}
+      (a == "" && $1 !~ /defaultslurmaccount$/) || $1 == a {printf " %s=%.3f", $1, $2}')
+  echo "$c  fair-share:${fs:- n/a}"
+  printf "  %-14s %5s %5s %5s %6s\n" partition free fit held total
+  sinfo -M "$c" -h -N -O "Partition:0|,NodeList:0|,StateCompact:0|,CPUsState:0|,AllocMem:0|,Memory:0|,Gres:0|,GresUsed:0" 2>/dev/null |
+    awk -F"|" -v cpg="$CPG" -v mpg="$((GPG * 1024))" '
+      function ngpu(s,   a, n) { if (!match(s, /gpu:[^:,(]+:[0-9]+/)) return 0
+        n = split(substr(s, RSTART, RLENGTH), a, ":"); return a[n] }
+      /^CLUSTER/ || NF < 8 {next}
+      $1 !~ /^gpu_/ || $1 ~ /(debug|long)/ {next}
+      { p = $1; total[p] += ngpu($7) }
+      $3 !~ /^(idle|mix|alloc|comp)[-]?$/ {next}      # down, drain, maint, resv, planned, not responding
+      { free = ngpu($7) - ngpu($8); if (free <= 0) next
+        split($4, cpu, "/")
+        if ($3 ~ /-$/) { held[p] += free; next }
+        f = free; byc = int(cpu[2] / cpg); bym = int(($6 - $5) / mpg)
+        if (byc < f) f = byc; if (bym < f) f = bym
+        avail[p] += free; fit[p] += f }
+      END { for (p in total) printf "  %-14s %5d %5d %5d %6d\n", p, avail[p], fit[p], held[p], total[p] }' | sort
+done
+
+if [ -r "$Q" ]; then
+  echo
+  sed "s/\x1b\[[0-9;]*m//g" "$Q" | awk '/^Queue state at/ {print "pending jobs, " $0}
+    /^[a-z]+:$/ {c = $1} /Pending jobs:/ {printf "  %-10s %-22s %s\n", c, $1, $NF}'
+fi

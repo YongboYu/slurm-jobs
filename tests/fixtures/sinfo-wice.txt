@@ -1,0 +1,8 @@
+CLUSTER: wice
+gpu_h100|n1|mix|16/48/0/64|187200|748800|gpu:h100:4(S:0-3)|gpu:h100:1(IDX:0)
+gpu_h100|n2|mix|62/2/0/64|187200|748800|gpu:h100:4(S:0-3)|gpu:h100:2(IDX:0-1)
+gpu_h100|n3|mix-|16/48/0/64|187200|748800|gpu:h100:4(S:0-3)|gpu:h100:1(IDX:0)
+gpu_h100|n4|drain|0/64/0/64|0|748800|gpu:h100:4(S:0-3)|gpu:h100:0(IDX:N/A)
+gpu_h100|n5|idle|0/64/0/64|0|748800|gpu:h100:4(S:0-3)|gpu:h100:0(IDX:N/A)
+gpu_a100_debug|d1|idle|0/72/0/72|0|504000|gpu:a100:4(S:0-3)|gpu:a100:0(IDX:N/A)
+batch|c1|idle|0/72/0/72|0|256000|(null)|gpu:0
