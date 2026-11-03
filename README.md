@@ -42,11 +42,21 @@ Scripts need only bash, awk and Python 3 standard library, as on the login nodes
 ## Install
 
 ```bash
-git clone git@github.com:YongboYu/slurm-jobs.git ~/.agents/skills/slurm-jobs
-ln -s ~/.agents/skills/slurm-jobs ~/.claude/skills/slurm-jobs     # Claude Code
-# the scripts run on the login node:
-rsync -a ~/.agents/skills/slurm-jobs/scripts/ hpc:"$(ssh hpc 'bash -lc "echo \$VSC_DATA"')"/slurm-jobs/
+npx skills add YongboYu/slurm-jobs -g      # all your projects; asks which agents (Claude Code, Codex, …)
+npx skills add YongboYu/slurm-jobs         # this project only
 ```
+
+Or by hand: `git clone https://github.com/YongboYu/slurm-jobs ~/.claude/skills/slurm-jobs`.
+Update later with `npx skills update` (or `git pull`).
+
+The scripts run on the login node; copy them there once:
+
+```bash
+rsync -a ~/.claude/skills/slurm-jobs/scripts/ hpc:"$(ssh hpc 'bash -lc "echo \$VSC_DATA"')"/slurm-jobs/
+```
+
+With `-g` and several agents the skill may land in `~/.agents/skills/slurm-jobs` instead; use
+that path.
 
 `hpc` is your SSH alias for a VSC login node. Then ask the agent, for example: "plan the
 sweep over these 12 datasets × 5 seeds on wICE", or "why is job 6253456 still pending?".
