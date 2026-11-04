@@ -7,6 +7,9 @@ ROOT=$(dirname "$HERE")
 export FIXTURES=$HERE/fixtures
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# Keep the user's own defaults out: no personal file, and run from an empty folder (no slurm/).
+export SLURM_JOBS_DEFAULTS=/nonexistent
+cd "$TMP"
 pass=0 fail=0
 
 check() {  # check <name> <expected substring> <actual output>
@@ -39,8 +42,26 @@ check "cluster-now: shape limits fit" "gpu_h100           9     4     3     20" 
 check "cluster-now: -A filters" "fair-share: lp_other=0.020" "$out"
 case $out in *debug*|*batch*) check "cluster-now: skips debug and CPU partitions" "no debug" "$out" ;; *) pass=$((pass + 1)) ;; esac
 
+# --- defaults files ---------------------------------------------------------------------------
+mkdir -p "$TMP/proj/slurm" && cd "$TMP/proj"
+printf 'ACCOUNT=lp_group\nCPUS_PER_GPU=16   # comment\nGB_PER_GPU=180\nCLUSTER=wice\n' > "$TMP/personal"
+out=$(SLURM_JOBS_DEFAULTS="$TMP/personal" PATH="$HERE/bin:$PATH" VSC_QUEUESTATE=/nonexistent bash "$ROOT/scripts/cluster-now" -M wice)
+check "defaults: personal file sets account and shape" "fair-share: lp_group=1.000" "$out"
+check "defaults: personal shape limits fit" "gpu_h100           9     7     3     20" "$out"
+printf 'CPUS_PER_GPU=24\nCLUSTER=mindwell\n' > slurm/defaults
+out=$(SLURM_JOBS_DEFAULTS="$TMP/personal" PATH="$HERE/bin:$PATH" VSC_QUEUESTATE=/nonexistent bash "$ROOT/scripts/cluster-now" -M wice)
+check "defaults: project file wins over personal" "gpu_h100           9     4     3     20" "$out"
+out=$(SLURM_JOBS_DEFAULTS="$TMP/personal" PATH="$HERE/bin:$PATH" VSC_QUEUESTATE=/nonexistent bash "$ROOT/scripts/cluster-now" -M wice -c 4 -m 32)
+check "defaults: flags win over files" "gpu_h100           9     7     3     20" "$out"
+SACCT_LOG=$TMP/sacct.log SLURM_JOBS_DEFAULTS="$TMP/personal" PATH="$HERE/bin:$PATH" \
+  python3 "$ROOT/scripts/suggest-time" --jobs 300 > /dev/null 2>&1
+check "defaults: suggest-time -M from project CLUSTER" "-M mindwell -j 300" "$(cat "$TMP/sacct.log")"
+SACCT_LOG=$TMP/sacct.log SLURM_JOBS_DEFAULTS="$TMP/personal" PATH="$HERE/bin:$PATH" \
+  python3 "$ROOT/scripts/suggest-time" -M wice --jobs 301 > /dev/null 2>&1
+check "defaults: suggest-time flag wins" "-M wice -j 301" "$(tail -1 "$TMP/sacct.log")"
+
 # --- array.sbatch + remaining ---------------------------------------------------------------
-cd "$TMP"
+mkdir -p "$TMP/campaign" && cd "$TMP/campaign"
 sed -e 's/<units per task>/2/' -e 's|<command>|./w|' "$ROOT/templates/array.sbatch" > job.sh
 printf 'a 1\nb/x 1\nc 1\nd 1\n' > units.txt
 printf '#!/bin/sh\nsleep 2\n' > w; chmod +x w

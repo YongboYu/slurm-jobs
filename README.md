@@ -22,7 +22,17 @@ own `sacct` history and from small pilots, then plans, submits and follows up a 
                  used vs asked goes into the plan, which becomes step 3's history next time
 ```
 
-A single job skips the plan file: steps 2 and 3, then the request.
+The agent does not always run all seven: SKILL.md opens with a routing table, so "size this
+job" stops at a suggested request, "why is it pending?" goes to steps 2 and 7, and a single job
+skips the plan file.
+
+## Your defaults
+
+Copy [`defaults.example`](defaults.example) to `~/.config/slurm-jobs/defaults` and fill in your
+SSH alias, project account, preferred cluster and usual CPUs and GB per GPU (the agent offers to
+write it on first use). A project can override any of them in its own `slurm/defaults`. The
+scripts read the same files on the login node, so copy the personal one there too. Updating the
+skill never touches these files.
 
 ## What is in here
 
@@ -35,6 +45,7 @@ A single job skips the plan file: steps 2 and 3, then the request.
 | `scripts/remaining` | Which array tasks still have units left, as an `--array=` list |
 | `templates/array.sbatch` | Array job over `units.txt`: skips finished units, stops cleanly near the time limit (exit 75), logs provenance |
 | `extras/queue-sampler` | Optional scrontab job that logs queue state every 30 min |
+| `defaults.example` | Your account, SSH alias, cluster and job shape, read by the agent and the scripts |
 | `tests/run.sh` | Offline tests (fake `sinfo`/`sshare`, saved `sacct` output) |
 
 Scripts need only bash, awk and Python 3 standard library, as on the login nodes.

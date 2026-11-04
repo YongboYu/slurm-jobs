@@ -5,10 +5,12 @@
 # Run on a KU Leuven login node.
 #
 #   cluster-now [-A account] [-c cpus-per-gpu] [-m GB-per-gpu] [-M clusters]
-#     -A  only this account (default: every account you have, except *defaultslurmaccount)
-#     -c  CPUs your job needs per GPU      (default 4)
-#     -m  memory your job needs per GPU, GB (default 32)
-#     -M  clusters, comma-separated        (default wice,mindwell)
+#     -A  only this account (default: ACCOUNT, else every account you have but *defaultslurmaccount)
+#     -c  CPUs your job needs per GPU       (default: CPUS_PER_GPU, else 4)
+#     -m  memory your job needs per GPU, GB (default: GB_PER_GPU, else 32)
+#     -M  clusters, comma-separated         (default: CLUSTERS, else wice,mindwell)
+#   Defaults come from ./slurm/defaults, then ~/.config/slurm-jobs/defaults (KEY=value lines);
+#   flags win. SLURM_JOBS_DEFAULTS=<file> replaces the personal file.
 #
 # Columns: free = GPUs not allocated on nodes that are up; fit = GPUs on nodes with free GPUs and
 # also -c CPUs and -m GB per GPU idle; held = free GPUs on nodes Slurm holds for a pending higher
@@ -16,10 +18,20 @@
 # reserved start. Debug, long and dedicated partitions are left out.
 set -o pipefail
 ACCOUNT= CPG=4 GPG=32 CLUSTERS=wice,mindwell
+# Personal file first, then the project's, so the project wins; flags below win over both.
+for f in "${SLURM_JOBS_DEFAULTS:-$HOME/.config/slurm-jobs/defaults}" slurm/defaults; do
+  [ -r "$f" ] || continue
+  while IFS='=' read -r k v; do
+    k=${k//[[:space:]]/}; v=${v%%#*}; v=${v//[[:space:]]/}
+    case $k in
+      ACCOUNT) ACCOUNT=$v ;; CPUS_PER_GPU) CPG=$v ;; GB_PER_GPU) GPG=$v ;; CLUSTERS) CLUSTERS=$v ;;
+    esac
+  done < "$f"
+done
 while getopts "A:c:m:M:h" o; do
   case $o in
     A) ACCOUNT=$OPTARG ;; c) CPG=$OPTARG ;; m) GPG=$OPTARG ;; M) CLUSTERS=$OPTARG ;;
-    *) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+    *) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
   esac
 done
 Q=${VSC_QUEUESTATE:-/etc/motd.d/vsc_queuestate}   # login message with pending jobs per partition

@@ -5,8 +5,8 @@ description: Plan, size, submit and manage Slurm jobs on the VSC/KU Leuven clust
 
 # slurm-jobs
 
-The work is a **campaign**: a set of work units (dataset × window × seed, model × fold, …) run as
-Slurm tasks. Waiting comes from two places (details and sources: [`reference/cluster.md`](reference/cluster.md)):
+Larger work is a **campaign**: a set of work units (dataset × window × seed, model × fold, …) run
+as Slurm tasks. Waiting comes from two places (details and sources: [`reference/cluster.md`](reference/cluster.md)):
 
 - **Rank**: priority is mostly the group's fair-share, which the user does not control.
 - **Fill**: backfill starts a lower job early when it fits a gap. The request decides whether it
@@ -14,14 +14,37 @@ Slurm tasks. Waiting comes from two places (details and sources: [`reference/clu
 
 So the lever is the request, and requests are predictable from history and pilots.
 
-**Access.** `hpc` below is the user's SSH alias for a VSC login node (ask for theirs when
-`ssh hpc true` fails). Run cluster commands as `ssh hpc 'bash -lc "<cmd>"'`: a plain
-`ssh hpc '<cmd>'` has no `$VSC_DATA` or modules. The scripts in `scripts/` run on the login node:
-sync this skill's `scripts/` folder with
+## Start where the request is
+
+Enter the steps at the row that matches the request and stop where the row says; run the earlier
+steps only when the entry step needs their output.
+
+| Request | Start at | Stop after |
+|---|---|---|
+| Run a sweep, campaign or many jobs | 1 Scope | 7 Watch and learn |
+| Write or submit one job | *One job, not a campaign* | its submission |
+| Size a job: `--time`, `--mem`, CPUs per GPU | 3 Read history (5 Pilot when there is none) | the suggested request, not submitted |
+| Where would it start soonest; why is it pending | 2 Read the cluster, then 7 *While pending* | the advice |
+| Timed out, out of memory, units left, resubmit | 7 *After the run* | the resubmission, approved |
+
+## Defaults
+
+Before the first cluster command, read the user's defaults: `slurm/defaults` in the project, then
+`~/.config/slurm-jobs/defaults`; a project value wins over the personal one. Keys and format:
+[`defaults.example`](defaults.example). `SSH_HOST` is the login node alias, `ACCOUNT` goes into
+`--account` and `cluster-now -A`, `CLUSTER` is tried first, and `CPUS_PER_GPU`/`GB_PER_GPU` are
+the usual shape. `cluster-now` and `suggest-time` read the same files on the login node.
+
+When neither file exists, ask the user once for the SSH alias, account and usual job shape, write
+`~/.config/slurm-jobs/defaults`, and copy it to the login node (command in the example). A project
+that differs (another account, one fixed GPU type) gets its own `slurm/defaults`.
+
+**Access.** `hpc` below stands for `SSH_HOST` from the defaults. Run cluster commands as
+`ssh hpc 'bash -lc "<cmd>"'`: a plain `ssh hpc '<cmd>'` has no `$VSC_DATA` or modules. The
+scripts in `scripts/` run on the login node: sync this skill's `scripts/` folder with
 `rsync -a <this skill>/scripts/ hpc:"$(ssh hpc 'bash -lc "echo \$VSC_DATA"')"/slurm-jobs/`
-and call `$VSC_DATA/slurm-jobs/<script>` (each takes `-h`). The account is the user's project
-account (`lp_…`): `sshare -U` lists theirs. SSH to the cluster drops out at times: when it fails,
-say so and continue with whatever is local.
+and call `$VSC_DATA/slurm-jobs/<script>` (each takes `-h`). SSH to the cluster drops out at
+times: when it fails, say so and continue with whatever is local.
 
 **Credits and the shared queue.** Pilots and campaigns spend the group's credits and occupy shared
 GPUs. A job costs its Slurm billing weight × minutes run (`sam-balance` shows what is left,
@@ -48,7 +71,8 @@ Done when every unit belongs to exactly one comparison group.
 
 ### 2. Read the cluster
 
-Run `cluster-now -c <CPUs per GPU> -m <GB per GPU>` with the job's shape: fair-share per account
+Run `cluster-now`, with `-c <CPUs per GPU> -m <GB per GPU>` when the job's shape differs from the
+defaults: fair-share per account
 and cluster, and per GPU partition the GPUs free, the GPUs a job of that shape fits on now, the
 GPUs held for a higher job, and the pending jobs. Run `sam-balance` for the credits left.
 Check the facts in `reference/cluster.md` against `scontrol show config` when its date is more

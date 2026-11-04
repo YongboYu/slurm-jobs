@@ -1,0 +1,4 @@
+#!/bin/sh
+# Records its arguments, answers with the saved sacct output.
+echo "$*" >> "${SACCT_LOG:-/dev/null}"
+cat "$FIXTURES/sacct.txt"

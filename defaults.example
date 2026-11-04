@@ -1,0 +1,11 @@
+# slurm-jobs defaults: KEY=value, one per line, # starts a comment.
+# Personal: ~/.config/slurm-jobs/defaults.  Project: <project>/slurm/defaults (wins over personal).
+# Flags on the scripts win over both. Copy the personal file to the login node too:
+#   ssh hpc 'mkdir -p ~/.config/slurm-jobs' && scp ~/.config/slurm-jobs/defaults hpc:.config/slurm-jobs/
+
+SSH_HOST=hpc             # SSH alias of a VSC login node (the agent uses it; the scripts run there)
+ACCOUNT=lp_example       # project account: charged by sbatch, shown by cluster-now (sshare -U lists yours)
+CLUSTERS=wice,mindwell   # clusters cluster-now reads
+CLUSTER=wice             # default -M for suggest-time, and the cluster to try first
+CPUS_PER_GPU=4           # your usual job shape, for cluster-now's "fit" column
+GB_PER_GPU=32
